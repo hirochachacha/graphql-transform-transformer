@@ -6,15 +6,15 @@ import {
   gql,
   getDirectiveArguments,
 } from 'graphql-transformer-core'
-import {ResolverResourceIDs} from 'graphql-transformer-common'
-import {printBlock, iff, not, raw, Expression, qref} from 'graphql-mapping-template'
+import {ResolverResourceIDs, isNonNullType, isListType, unwrapNonNull} from 'graphql-transformer-common'
+import {printBlock, iff, forEach, not, raw, Expression, qref, ref} from 'graphql-mapping-template'
 
 export class TransformTransformer extends Transformer {
   constructor() {
     super(
       'TransformTransformer',
       gql`
-        directive @transform(expression: String!) on FIELD_DEFINITION
+        directive @transform(expression: String!, foreach: Boolean = false) on FIELD_DEFINITION
       `
     )
   }
@@ -34,15 +34,22 @@ export class TransformTransformer extends Transformer {
     // Validation - @model required
     this.validateParentModelDirective(parent!)
 
-    const {expression} = getDirectiveArguments(directive)
+    const {expression, foreach} = getDirectiveArguments(directive)
+
+    if (foreach) {
+      // Validation - List required
+      this.validateListFieldType(definition)
+    }
 
     // Generate the VTL code block
     const typeName = parent.name.value
     const fieldName = definition.name.value
 
-    const validationExpression = this.generateValidationExpression(fieldName, expression)
+    const transformExpression = this.generateTransformExpression(fieldName, expression, foreach)
 
-    const vtlCode = printBlock(`Transformation for "${fieldName}" (${expression})`)(validationExpression)
+    const vtlCode = printBlock(`Transformation for "${fieldName}" (${expression}, foreach=${foreach})`)(
+      transformExpression
+    )
 
     // Update create and update mutations
     const createResolverResourceId = ResolverResourceIDs.DynamoDBCreateResolverResourceID(typeName)
@@ -60,15 +67,37 @@ export class TransformTransformer extends Transformer {
     }
   }
 
+  private validateListFieldType = (field: FieldDefinitionNode) => {
+    let isValidType = isListType(field.type)
+
+    if (isNonNullType(field.type)) {
+      isValidType = isListType(unwrapNonNull(field.type).type)
+    }
+
+    if (!isValidType) {
+      throw new InvalidDirectiveError(
+        `@transform directive with foreach=true option can only be used on list type fields.`
+      )
+    }
+  }
+
   private quote = (s: string) => {
     return `'${s.replace(/'/g, "''")}'`
   }
 
-  private generateValidationExpression = (fieldName: string, expression: string): Expression => {
+  private generateTransformExpression = (fieldName: string, expression: string, foreach: boolean): Expression => {
     const name = this.quote(fieldName)
     const val = `$ctx.args.input.${fieldName}`
-    const expr1 = expression.replace(/\B\.\B/g, val).replace(/(?=^|[^)\]}]\B)\./g, `${val}.`)
-    return iff(not(raw(`$util.isNull(${val})`)), qref(`$ctx.args.input.put(${name}, ${expr1})`))
+    if (foreach) {
+      const expr1 = expression.replace(/\B\.\B/g, `$entry`).replace(/(?=^|[^)\]}]\B)\./g, `$entry.`)
+      return iff(
+        not(raw(`$util.isNull(${val})`)),
+        forEach(ref('entry'), ref(val.slice(1)), [qref(`${val}.set($foreach.index, ${expr1})`)])
+      )
+    } else {
+      const expr1 = expression.replace(/\B\.\B/g, val).replace(/(?=^|[^)\]}]\B)\./g, `${val}.`)
+      return iff(not(raw(`$util.isNull(${val})`)), qref(`$ctx.args.input.put(${name}, ${expr1})`))
+    }
   }
 
   private updateResolver = (ctx: TransformerContext, resolverResourceId: string, code: string) => {

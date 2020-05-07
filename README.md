@@ -4,7 +4,7 @@ graphql-transform-transformer
 A custom transformer of the amplify-cli. It can transform fields.
 
 ```
-directive @transform(expression: String!) on FIELD_DEFINITION
+directive @transform(expression: String!, foreach: Boolean = false) on FIELD_DEFINITION
 ```
 
 ## Usage
@@ -40,6 +40,7 @@ type Post @model {
   id: ID!
   title: String! @transform(expression: ".toLowerCase().trim()")
   text: String
+  tags: [String!] @transform(expression: ".trim()", foreach: true)
 }
 ```
 
