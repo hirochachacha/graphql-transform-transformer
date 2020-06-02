@@ -14,7 +14,7 @@ export class TransformTransformer extends Transformer {
     super(
       'TransformTransformer',
       gql`
-        directive @transform(expression: String!, foreach: Boolean = false) on FIELD_DEFINITION
+        directive @transform(expression: String!, foreach: Boolean = false, always: Boolean = false) on FIELD_DEFINITION
       `
     )
   }
@@ -34,7 +34,7 @@ export class TransformTransformer extends Transformer {
     // Validation - @model required
     this.validateParentModelDirective(parent!)
 
-    const {expression, foreach} = getDirectiveArguments(directive)
+    const {expression, foreach, always} = getDirectiveArguments(directive)
 
     if (foreach) {
       // Validation - List required
@@ -45,11 +45,11 @@ export class TransformTransformer extends Transformer {
     const typeName = parent.name.value
     const fieldName = definition.name.value
 
-    const transformExpression = this.generateTransformExpression(fieldName, expression, foreach)
+    const transformExpression = this.generateTransformExpression(fieldName, expression, foreach, always)
 
-    const vtlCode = printBlock(`Transformation for "${fieldName}" (${expression}, foreach=${foreach})`)(
-      transformExpression
-    )
+    const vtlCode = printBlock(
+      `Transformation for "${fieldName}" (${expression}, foreach=${foreach}, always=${always})`
+    )(transformExpression)
 
     // Update create and update mutations
     const createResolverResourceId = ResolverResourceIDs.DynamoDBCreateResolverResourceID(typeName)
@@ -85,18 +85,24 @@ export class TransformTransformer extends Transformer {
     return `'${s.replace(/'/g, "''")}'`
   }
 
-  private generateTransformExpression = (fieldName: string, expression: string, foreach: boolean): Expression => {
+  private generateTransformExpression = (
+    fieldName: string,
+    expression: string,
+    foreach: boolean,
+    always: boolean
+  ): Expression => {
     const name = this.quote(fieldName)
     const val = `$ctx.args.input.${fieldName}`
+    const emit: (expr: Expression) => Expression = always
+      ? (expr: Expression) => expr
+      : (expr: Expression) => iff(not(raw(`$util.isNull(${val})`)), expr)
+
     if (foreach) {
       const expr1 = expression.replace(/\B\.\B/g, `$entry`).replace(/(?=^|[^)\]}]\B)\./g, `$entry.`)
-      return iff(
-        not(raw(`$util.isNull(${val})`)),
-        forEach(ref('entry'), ref(val.slice(1)), [qref(`${val}.set($foreach.index, ${expr1})`)])
-      )
+      return emit(forEach(ref('entry'), ref(val.slice(1)), [qref(`${val}.set($foreach.index, ${expr1})`)]))
     } else {
       const expr1 = expression.replace(/\B\.\B/g, val).replace(/(?=^|[^)\]}]\B)\./g, `${val}.`)
-      return iff(not(raw(`$util.isNull(${val})`)), qref(`$ctx.args.input.put(${name}, ${expr1})`))
+      return emit(qref(`$ctx.args.input.put(${name}, ${expr1})`))
     }
   }
 
